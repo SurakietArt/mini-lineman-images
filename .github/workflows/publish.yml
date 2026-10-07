@@ -1,0 +1,47 @@
+name: publish images
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+
+    # GITHUB_TOKEN is minted per run; packages:write lets it push to ghcr,
+    # so there is no stored secret to rotate (ADR 0001 decision 6).
+    permissions:
+      contents: read
+      packages: write
+
+    strategy:
+      fail-fast: false
+      matrix:
+        image: [go-tools, py-tools]
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: docker/setup-buildx-action@v4
+
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Immutable tag: UTC date + short SHA, never reused (ADR 0001 decision 6).
+      # ghcr does not enforce immutability, so the SHA is what actually guarantees it.
+      - name: Compute tag
+        id: tag
+        run: echo "value=$(date -u +%Y-%m-%d)-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/build-push-action@v7
+        with:
+          context: ${{ matrix.image }}
+          push: true
+          # provenance off: buildx otherwise pushes an extra attestation manifest that
+          # shows up as an "unknown/unknown" package version and muddies digest checks.
+          provenance: false
+          tags: ghcr.io/${{ github.repository_owner }}/mini-lineman-${{ matrix.image }}:${{ steps.tag.outputs.value }}
