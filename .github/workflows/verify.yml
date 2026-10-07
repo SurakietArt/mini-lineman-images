@@ -1,0 +1,90 @@
+name: verify images
+
+# develop is the integration branch: build, push a throwaway dev- tag, prove the
+# image actually works, then delete it. Building without pushing would never
+# exercise the tag computation, the registry auth or the push itself — which is
+# where the first real failure was.
+on:
+  push:
+    branches: [develop]
+  workflow_dispatch:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      packages: write
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: go-tools
+            check: 'go version && go env GOTOOLCHAIN && golangci-lint version'
+          - image: py-tools
+            check: 'python --version && pip --version'
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: docker/setup-buildx-action@v4
+
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # dev- prefix so a throwaway is distinguishable from a release at a glance.
+      # Owner lowercased: OCI repository names may not contain uppercase.
+      - name: Compute image reference
+        id: ref
+        run: |
+          echo "owner=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_OUTPUT"
+          echo "tag=dev-$(date -u +%Y-%m-%d)-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+          echo "pkg=mini-lineman-${{ matrix.image }}" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push throwaway image
+        uses: docker/build-push-action@v7
+        with:
+          context: ${{ matrix.image }}
+          push: true
+          provenance: false
+          tags: ghcr.io/${{ steps.ref.outputs.owner }}/${{ steps.ref.outputs.pkg }}:${{ steps.ref.outputs.tag }}
+
+      # Pull it back from the registry rather than using the local build cache:
+      # proves the pushed artifact is really there and really runnable.
+      - name: Smoke test the pushed image
+        run: |
+          ref="ghcr.io/${{ steps.ref.outputs.owner }}/${{ steps.ref.outputs.pkg }}:${{ steps.ref.outputs.tag }}"
+          docker pull "$ref"
+          docker run --rm "$ref" sh -lc '${{ matrix.check }}'
+
+      # Always runs: a cancelled or failed job must not leave the throwaway behind.
+      - name: Delete the throwaway version
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PKG: ${{ steps.ref.outputs.pkg }}
+          TAG: ${{ steps.ref.outputs.tag }}
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          set -o pipefail
+          # The version id is not known until after the push, so look it up by tag.
+          for base in "/users/$OWNER/packages/container/$PKG" "/user/packages/container/$PKG"; do
+            echo "trying $base/versions"
+            if ids=$(gh api --paginate "$base/versions" \
+                  --jq ".[] | select(.metadata.container.tags[]? == \"$TAG\") | .id" 2>/dev/null) \
+               && [ -n "$ids" ]; then
+              for id in $ids; do
+                echo "deleting version $id ($TAG)"
+                gh api -X DELETE "$base/versions/$id"
+              done
+              echo "cleanup done via $base"
+              exit 0
+            fi
+          done
+          echo "::error::could not find or delete $TAG — GITHUB_TOKEN may lack package delete rights; a PAT with delete:packages would be needed"
+          exit 1
