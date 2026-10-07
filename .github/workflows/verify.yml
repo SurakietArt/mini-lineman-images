@@ -60,7 +60,7 @@ jobs:
         run: |
           ref="ghcr.io/${{ steps.ref.outputs.owner }}/${{ steps.ref.outputs.pkg }}:${{ steps.ref.outputs.tag }}"
           docker pull "$ref"
-          docker run --rm "$ref" sh -lc '${{ matrix.check }}'
+          docker run --rm "$ref" sh -c '${{ matrix.check }}'
 
       # Always runs: a cancelled or failed job must not leave the throwaway behind.
       - name: Delete the throwaway version
