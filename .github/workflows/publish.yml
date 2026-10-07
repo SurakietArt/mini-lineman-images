@@ -18,7 +18,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        image: [go-tools, py-tools]
+        include:
+          - image: go-tools
+            check: 'go version && go env GOTOOLCHAIN && golangci-lint version'
+          - image: py-tools
+            check: 'python --version && pip --version'
 
     steps:
       - uses: actions/checkout@v7
@@ -48,3 +52,13 @@ jobs:
           # shows up as an "unknown/unknown" package version and muddies digest checks.
           provenance: false
           tags: ghcr.io/${{ steps.ref.outputs.owner }}/mini-lineman-${{ matrix.image }}:${{ steps.ref.outputs.tag }}
+
+      # The kept artifact is the one worth verifying. Pull it back from the registry
+      # rather than trusting the local build cache, and run the tools inside it.
+      # sh -c, not sh -lc: a login shell sources /etc/profile and overwrites PATH,
+      # discarding the /usr/local/go/bin the image sets via ENV.
+      - name: Smoke test the published image
+        run: |
+          ref="ghcr.io/${{ steps.ref.outputs.owner }}/mini-lineman-${{ matrix.image }}:${{ steps.ref.outputs.tag }}"
+          docker pull "$ref"
+          docker run --rm "$ref" sh -c '${{ matrix.check }}'
